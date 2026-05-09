@@ -1,0 +1,32 @@
+# monitoring/prometheus.yml
+# Prometheus scrape configuration for GitOps Platform
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # FastAPI backend metrics (via /metrics endpoint)
+  - job_name: 'fastapi-backend'
+    static_configs:
+      - targets: ['host.docker.internal:8000']    # Use localhost if running natively
+    metrics_path: '/metrics'
+
+  # Kubernetes node metrics via Minikube
+  - job_name: 'kubernetes-nodes'
+    static_configs:
+      - targets: ['host.docker.internal:10250']
+    scheme: https
+    tls_config:
+      insecure_skip_verify: true
+
+  # Docker container metrics (if using cAdvisor)
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['host.docker.internal:8080']
