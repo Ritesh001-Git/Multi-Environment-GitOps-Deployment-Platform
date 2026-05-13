@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: app
-          image: IMAGE_PLACEHOLDER      # Jenkins replaces this at deploy time
+          image: ritesh1973/gitops-app:latest      # Jenkins replaces this at deploy time
           imagePullPolicy: Always
           ports:
             - containerPort: 8000
