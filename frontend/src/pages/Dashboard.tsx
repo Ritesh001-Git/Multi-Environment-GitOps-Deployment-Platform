@@ -81,8 +81,8 @@ export default function Dashboard() {
                         url: `${import.meta.env.VITE_JENKINS_URL ?? "http://localhost:8080"}`,
                         icon: "◉",
                       },
-                      { label: "Grafana", url: "http://localhost:3001", icon: "📊" },
-                      { label: "Prometheus", url: "http://localhost:9090", icon: "📈" },
+                      { label: "Grafana", url: `${import.meta.env.VITE_GRAFANA_URL ?? "http://localhost:3001"}`, icon: "📊" },
+                      { label: "Prometheus", url: `${import.meta.env.VITE_PROMETHEUS_URL ?? "http://localhost:9090"}`, icon: "📈" },
                       {
                         label: "API Docs",
                         url: `${import.meta.env.VITE_BACKEND_URL ?? "http://localhost:8000"}/docs`,

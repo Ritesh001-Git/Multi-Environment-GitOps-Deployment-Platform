@@ -65,4 +65,3 @@ platform_info = Info(
     'GitOps platform version information'
 )
 platform_info.info({'version': '1.0.0', 'environment': 'production'})
-
