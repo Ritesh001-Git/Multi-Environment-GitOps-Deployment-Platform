@@ -82,6 +82,13 @@ resource "aws_security_group" "jenkins_sg" {
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  ingress {
+    description = "Node Exporter"
+    from_port   = 9100
+    to_port     = 9100
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 
   egress {
     description = "Allow all outbound traffic"
@@ -224,6 +231,14 @@ output "jenkins_ip" {
 
 output "app_ip" {
   value = aws_eip.app_eip.public_ip
+}
+
+output "jenkins_private_ip" {
+  value = aws_instance.jenkins_ec2.private_ip
+}
+
+output "app_private_ip" {
+  value = aws_instance.app_ec2.private_ip
 }
 
 output "jenkins_ssh" {
