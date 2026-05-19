@@ -1,0 +1,38 @@
+# Scoped permissions for the Jenkins pipeline to deploy into the gitops namespace
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jenkins-deployer
+  namespace: gitops
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jenkins-deploy-role
+  namespace: gitops
+rules:
+  - apiGroups: ["", "apps", "extensions"]
+    resources:
+      - deployments
+      - services
+      - pods
+      - pods/log
+      - replicasets
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jenkins-deploy-binding
+  namespace: gitops
+subjects:
+  - kind: ServiceAccount
+    name: jenkins-deployer
+    namespace: gitops
+roleRef:
+  kind: Role
+  name: jenkins-deploy-role
+  apiGroup: rbac.authorization.k8s.io

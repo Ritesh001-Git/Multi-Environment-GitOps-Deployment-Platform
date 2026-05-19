@@ -1,0 +1,15 @@
+# Expose kube-state-metrics so Prometheus on Jenkins EC2 can scrape it
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics-nodeport
+  namespace: kube-system
+spec:
+  selector:
+    app.kubernetes.io/name: kube-state-metrics
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      nodePort: 30091
+  type: NodePort
