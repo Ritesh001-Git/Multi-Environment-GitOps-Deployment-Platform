@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./gitops.db"
 
     # ── Jenkins ──────────────────────────────────────────────────────────────
-    JENKINS_URL: str = "http://localhost:8080"
+    JENKINS_URL: str = "http://44.214.81.126:8080"
     JENKINS_USER: str = "admin"
     JENKINS_TOKEN: str = ""
     JENKINS_JOB_NAME: str = "gitops-deploy"

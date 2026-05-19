@@ -1,152 +1,274 @@
 """
-api/routes/deployments.py — All REST + WebSocket endpoints.
-
-Route ordering is critical in FastAPI — specific static routes must come
-BEFORE parameterised /{id} routes or FastAPI will shadow them.
-
-Correct order:
-  /stats
-  /kubernetes/overview      ← must be before /{deployment_id}
-  /kubernetes/pods          ← must be before /{deployment_id}
-  /kubernetes/deployments   ← must be before /{deployment_id}
-  /webhook/github           ← must be before /{deployment_id}
-  /ws/{deployment_id}       ← WebSocket
-  POST ""                   ← create
-  GET  ""                   ← list
-  GET  /{deployment_id}     ← single lookup  (LAST among GETs)
-  GET  /{deployment_id}/status
+api/routes/deployments.py
+REST + WebSocket endpoints for GitOps platform.
 """
+
 import asyncio
 import json
 import logging
 from typing import Optional
 
 from fastapi import (
-    APIRouter, Depends, HTTPException, BackgroundTasks,
-    Query, WebSocket, WebSocketDisconnect,
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    WebSocket,
+    WebSocketDisconnect,
 )
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from core.config import settings
 from db.database import get_db
+from k8s.client import k8s_service
 from models.deployment import DeploymentStatus
 from schemas.deployment import (
-    DeployRequest, DeploymentOut, DeploymentListOut,
-    TriggerResponse, DashboardStats, K8sOverview,
+    DashboardStats,
+    DeployRequest,
+    DeploymentListOut,
+    DeploymentOut,
+    K8sOverview,
+    TriggerResponse,
 )
+
 from services import deployment_service as svc
-from k8s.client import k8s_service
-from core.config import settings
 
 logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 
-# ── 1. Dashboard stats ────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Dashboard Stats
+# ─────────────────────────────────────────────────────────────────────────────
 
-@router.get("/stats", response_model=DashboardStats, summary="Dashboard overview cards")
-async def get_stats(db: AsyncSession = Depends(get_db)):
+@router.get(
+    "/stats",
+    response_model=DashboardStats,
+)
+async def get_stats(
+    db: AsyncSession = Depends(get_db),
+):
     return await svc.get_dashboard_stats(db)
 
 
-# ── 2. Kubernetes routes (BEFORE /{deployment_id}) ───────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Kubernetes Routes
+# ─────────────────────────────────────────────────────────────────────────────
 
-@router.get("/kubernetes/overview", response_model=K8sOverview, summary="Full K8s overview")
+@router.get(
+    "/kubernetes/overview",
+    response_model=K8sOverview,
+)
 async def k8s_overview(
-    namespace: str = Query("default", description="Kubernetes namespace or 'all'"),
+    namespace: str = Query("gitops"),
 ):
     return k8s_service.get_overview(namespace)
 
 
-@router.get("/kubernetes/pods", summary="List pods")
-async def list_pods(namespace: str = Query("default")):
+@router.get("/kubernetes/pods")
+async def list_pods(
+    namespace: str = Query("gitops"),
+):
+
     pods = k8s_service.get_pods(namespace)
-    return {"namespace": namespace, "total": len(pods), "pods": [p.model_dump() for p in pods]}
+
+    return {
+        "namespace": namespace,
+        "total": len(pods),
+        "pods": [
+            p.model_dump()
+            for p in pods
+        ],
+    }
 
 
-@router.get("/kubernetes/deployments", summary="List K8s deployments")
-async def list_k8s_deployments(namespace: str = Query("default")):
+@router.get("/kubernetes/deployments")
+async def list_k8s_deployments(
+    namespace: str = Query("gitops"),
+):
+
     deps = k8s_service.get_deployments(namespace)
-    return {"deployments": [d.model_dump() for d in deps]}
+
+    return {
+        "deployments": [
+            d.model_dump()
+            for d in deps
+        ]
+    }
 
 
-# ── 3. GitHub webhook (static path — before /{deployment_id}) ────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# GitHub Webhook
+# ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("/webhook/github", summary="GitHub push webhook")
+@router.post("/webhook/github")
 async def github_webhook(
     request_body: dict,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    ref = request_body.get("ref", "")
-    branch = ref.replace("refs/heads/", "")
-    repo_url = request_body.get("repository", {}).get("clone_url", "")
 
-    if not repo_url or not repo_url.startswith("https://github.com/"):
+    ref = request_body.get("ref", "")
+
+    branch = ref.replace(
+        "refs/heads/",
+        "",
+    )
+
+    repo_url = (
+        request_body.get("repository", {})
+        .get("clone_url", "")
+    )
+
+    if (
+        not repo_url
+        or not repo_url.startswith(
+            "https://github.com/"
+        )
+    ):
         return {"status": "ignored"}
 
-    payload = DeployRequest(repo_url=repo_url, branch=branch)
-    dep = await svc.create_deployment(db, payload)
+    payload = DeployRequest(
+        repo_url=repo_url,
+        branch=branch,
+    )
+
+    dep = await svc.create_deployment(
+        db,
+        payload,
+    )
+
     dep.triggered_by = "webhook"
+
     await db.commit()
 
-    background_tasks.add_task(svc.run_pipeline, dep.id)
-    logger.info(f"Webhook triggered deployment {dep.id} for {repo_url}@{branch}")
-    return {"status": "triggered", "deployment_id": dep.id}
+    # IMPORTANT FIX
+    asyncio.create_task(
+        svc.run_pipeline(dep.id)
+    )
+
+    logger.info(
+        f"Webhook deployment started: "
+        f"{dep.id}"
+    )
+
+    return {
+        "status": "triggered",
+        "deployment_id": dep.id,
+    }
 
 
-# ── 4. WebSocket (before /{deployment_id}) ────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# WebSocket
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.websocket("/ws/{deployment_id}")
 async def deployment_websocket(
     websocket: WebSocket,
     deployment_id: str,
-    db: AsyncSession = Depends(get_db),
 ):
+
     await websocket.accept()
+
+    logger.info(
+        f"WebSocket connected for deployment {deployment_id}"
+    )
+
     try:
+
         while True:
-            dep = await svc.get_deployment(db, deployment_id)
-            if not dep:
-                await websocket.send_text(json.dumps({"error": "not_found"}))
-                break
 
-            payload = {
-                "id": dep.id,
-                "status": dep.status.value,
-                "jenkins_build_number": dep.jenkins_build_number,
-                "jenkins_build_url": dep.jenkins_build_url,
-                "duration_seconds": dep.duration_seconds,
-                "finished_at": dep.finished_at.isoformat() if dep.finished_at else None,
-            }
-            await websocket.send_text(json.dumps(payload))
+            async with AsyncSessionLocal() as db:
 
-            if dep.status in (
-                DeploymentStatus.SUCCESS,
-                DeploymentStatus.FAILED,
-                DeploymentStatus.CANCELLED,
-            ):
-                break
+                deployment = await svc.get_deployment(
+                    db,
+                    deployment_id,
+                )
 
-            await asyncio.sleep(settings.POLL_INTERVAL_SECONDS)
+                if not deployment:
+
+                    await websocket.send_json({
+                        "error": "Deployment not found"
+                    })
+
+                    break
+
+                await websocket.send_json({
+                    "id": deployment.id,
+                    "status": deployment.status.value,
+                    "jenkins_build_number": deployment.jenkins_build_number,
+                    "started_at": (
+                        deployment.started_at.isoformat()
+                        if deployment.started_at else None
+                    ),
+                    "finished_at": (
+                        deployment.finished_at.isoformat()
+                        if deployment.finished_at else None
+                    ),
+                    "duration_seconds": deployment.duration_seconds,
+                })
+
+                if deployment.status in [
+                    DeploymentStatus.SUCCESS,
+                    DeploymentStatus.FAILED,
+                    DeploymentStatus.CANCELLED,
+                ]:
+                    break
+
+            await asyncio.sleep(2)
 
     except WebSocketDisconnect:
-        logger.info(f"WebSocket disconnected for deployment {deployment_id}")
+
+        logger.info(
+            f"WebSocket disconnected for deployment {deployment_id}"
+        )
+
+    except Exception as e:
+
+        logger.error(
+            f"WebSocket error for deployment "
+            f"{deployment_id}: {e}"
+        )
+
     finally:
-        await websocket.close()
+
+        try:
+            await websocket.close()
+        except:
+            pass
 
 
-# ── 5. Deployments collection (create + list) ─────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Trigger Deployment
+# ─────────────────────────────────────────────────────────────────────────────
 
-@router.post("", response_model=TriggerResponse, status_code=202, summary="Trigger new deployment")
+@router.post(
+    "",
+    response_model=TriggerResponse,
+    status_code=202,
+)
 async def trigger_deployment(
     payload: DeployRequest,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    dep = await svc.create_deployment(db, payload)
+
+    dep = await svc.create_deployment(
+        db,
+        payload,
+    )
+
     await db.commit()
-    background_tasks.add_task(svc.run_pipeline, dep.id)
-    logger.info(f"Deployment {dep.id} queued for {payload.repo_url}")
+
+    # IMPORTANT FIX
+    asyncio.create_task(
+        svc.run_pipeline(dep.id)
+    )
+
+    logger.info(
+        f"Deployment queued: {dep.id}"
+    )
+
     return TriggerResponse(
         deployment_id=dep.id,
         jenkins_build_number=None,
@@ -155,51 +277,122 @@ async def trigger_deployment(
     )
 
 
-@router.get("", response_model=DeploymentListOut, summary="List deployment history")
+# ─────────────────────────────────────────────────────────────────────────────
+# List Deployments
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "",
+    response_model=DeploymentListOut,
+)
 async def list_deployments(
-    limit: int = Query(50, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-    status: Optional[DeploymentStatus] = Query(None),
+    limit: int = Query(
+        50,
+        ge=1,
+        le=200,
+    ),
+    offset: int = Query(
+        0,
+        ge=0,
+    ),
+    status: Optional[
+        DeploymentStatus
+    ] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    total, items = await svc.list_deployments(db, limit=limit, offset=offset, status=status)
-    return DeploymentListOut(total=total, items=[_enrich(d) for d in items])
+
+    total, items = (
+        await svc.list_deployments(
+            db,
+            limit=limit,
+            offset=offset,
+            status=status,
+        )
+    )
+
+    return DeploymentListOut(
+        total=total,
+        items=[
+            _enrich(d)
+            for d in items
+        ],
+    )
 
 
-# ── 6. Single deployment lookup (/{id} routes — MUST come last) ──────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Deployment Status
+# ─────────────────────────────────────────────────────────────────────────────
 
-@router.get("/{deployment_id}/status", summary="Poll deployment status (lightweight)")
+@router.get("/{deployment_id}/status")
 async def get_deployment_status(
     deployment_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    dep = await svc.get_deployment(db, deployment_id)
+
+    dep = await svc.get_deployment(
+        db,
+        deployment_id,
+    )
+
     if not dep:
-        raise HTTPException(status_code=404, detail="Not found.")
+
+        raise HTTPException(
+            status_code=404,
+            detail="Not found",
+        )
+
     return {
         "id": dep.id,
         "status": dep.status,
-        "jenkins_build_number": dep.jenkins_build_number,
-        "jenkins_build_url": dep.jenkins_build_url,
-        "duration_seconds": dep.duration_seconds,
-        "finished_at": dep.finished_at,
+        "jenkins_build_number":
+            dep.jenkins_build_number,
+        "jenkins_build_url":
+            dep.jenkins_build_url,
+        "duration_seconds":
+            dep.duration_seconds,
+        "finished_at":
+            dep.finished_at,
     }
 
 
-@router.get("/{deployment_id}", response_model=DeploymentOut, summary="Get single deployment")
+# ─────────────────────────────────────────────────────────────────────────────
+# Get Single Deployment
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/{deployment_id}",
+    response_model=DeploymentOut,
+)
 async def get_deployment(
     deployment_id: str,
     db: AsyncSession = Depends(get_db),
 ):
-    dep = await svc.get_deployment(db, deployment_id)
+
+    dep = await svc.get_deployment(
+        db,
+        deployment_id,
+    )
+
     if not dep:
-        raise HTTPException(status_code=404, detail=f"Deployment {deployment_id} not found.")
+
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Deployment "
+                f"{deployment_id} "
+                f"not found"
+            ),
+        )
+
     return _enrich(dep)
 
 
-# ── Helper ────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper
+# ─────────────────────────────────────────────────────────────────────────────
 
 def _enrich(dep) -> DeploymentOut:
+
     return DeploymentOut(
         id=dep.id,
         repo_url=dep.repo_url,

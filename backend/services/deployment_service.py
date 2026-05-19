@@ -350,6 +350,9 @@ async def run_pipeline(deployment_id: str) -> None:
         )
 
         if not deployment:
+            logger.error(
+                f"Deployment {deployment_id} not found"
+            )
             return
 
         # ─────────────────────────────────────────
@@ -369,8 +372,8 @@ async def run_pipeline(deployment_id: str) -> None:
 
         async with httpx.AsyncClient() as http:
 
+            # Set RUNNING
             deployment.status = DeploymentStatus.RUNNING
-
             await db.commit()
 
             # ─────────────────────────────────────
@@ -392,13 +395,33 @@ async def run_pipeline(deployment_id: str) -> None:
 
             if queue_id is None:
 
-                deployment.finish(
-                    DeploymentStatus.FAILED
+                result = await db.execute(
+                    select(Deployment).where(
+                        Deployment.id == deployment_id
+                    )
                 )
 
-                await db.commit()
+                fresh = result.scalar_one_or_none()
 
-                duration = time.time() - pipeline_start
+                if fresh:
+                    fresh.status = DeploymentStatus.FAILED
+                    fresh.finished_at = datetime.now(
+                        timezone.utc
+                    )
+
+                    if fresh.started_at:
+                        started = fresh.started_at
+
+                        if started.tzinfo is None:
+                            started = started.replace(
+                                tzinfo=timezone.utc
+                            )
+
+                        fresh.duration_seconds = (
+                            fresh.finished_at - started
+                        ).total_seconds()
+
+                    await db.commit()
 
                 deployments_failed.labels(
                     environment=deployment.environment.value
@@ -407,11 +430,6 @@ async def run_pipeline(deployment_id: str) -> None:
                 active_deployments.labels(
                     environment=deployment.environment.value
                 ).dec()
-
-                deployment_duration.labels(
-                    environment=deployment.environment.value,
-                    status="failed",
-                ).observe(duration)
 
                 return
 
@@ -426,23 +444,55 @@ async def run_pipeline(deployment_id: str) -> None:
 
             if build_number:
 
-                deployment.jenkins_build_number = build_number
-
-                deployment.jenkins_build_url = (
-                    f"{settings.JENKINS_URL}/job/"
-                    f"{settings.JENKINS_JOB_NAME}/"
-                    f"{build_number}/"
+                result = await db.execute(
+                    select(Deployment).where(
+                        Deployment.id == deployment_id
+                    )
                 )
 
-                await db.commit()
+                fresh = result.scalar_one_or_none()
+
+                if fresh:
+
+                    fresh.jenkins_build_number = build_number
+
+                    fresh.jenkins_build_url = (
+                        f"{settings.JENKINS_URL}/job/"
+                        f"{settings.JENKINS_JOB_NAME}/"
+                        f"{build_number}/"
+                    )
+
+                    await db.commit()
 
             else:
 
-                deployment.finish(
-                    DeploymentStatus.FAILED
+                result = await db.execute(
+                    select(Deployment).where(
+                        Deployment.id == deployment_id
+                    )
                 )
 
-                await db.commit()
+                fresh = result.scalar_one_or_none()
+
+                if fresh:
+                    fresh.status = DeploymentStatus.FAILED
+                    fresh.finished_at = datetime.now(
+                        timezone.utc
+                    )
+
+                    if fresh.started_at:
+                        started = fresh.started_at
+
+                        if started.tzinfo is None:
+                            started = started.replace(
+                                tzinfo=timezone.utc
+                            )
+
+                        fresh.duration_seconds = (
+                            fresh.finished_at - started
+                        ).total_seconds()
+
+                    await db.commit()
 
                 deployments_failed.labels(
                     environment=deployment.environment.value
@@ -474,15 +524,46 @@ async def run_pipeline(deployment_id: str) -> None:
 
                 if jenkins_status == "success":
 
-                    deployment.finish(
-                        DeploymentStatus.SUCCESS
+                    result = await db.execute(
+                        select(Deployment).where(
+                            Deployment.id == deployment_id
+                        )
                     )
 
-                    deployment.k8s_deployment_name = _repo_slug(
-                        deployment.repo_url
-                    )
+                    fresh = result.scalar_one_or_none()
 
-                    await db.commit()
+                    if fresh:
+
+                        fresh.status = DeploymentStatus.SUCCESS
+
+                        fresh.finished_at = datetime.now(
+                            timezone.utc
+                        )
+
+                        if fresh.started_at:
+
+                            started = fresh.started_at
+
+                            if started.tzinfo is None:
+                                started = started.replace(
+                                    tzinfo=timezone.utc
+                                )
+
+                            fresh.duration_seconds = (
+                                fresh.finished_at - started
+                            ).total_seconds()
+
+                        fresh.k8s_deployment_name = (
+                            _repo_slug(
+                                fresh.repo_url
+                            )
+                        )
+
+                        await db.commit()
+
+                        logger.info(
+                            f"Deployment {deployment_id} marked SUCCESS"
+                        )
 
                     duration = time.time() - pipeline_start
 
@@ -512,11 +593,40 @@ async def run_pipeline(deployment_id: str) -> None:
 
                 elif jenkins_status == "failed":
 
-                    deployment.finish(
-                        DeploymentStatus.FAILED
+                    result = await db.execute(
+                        select(Deployment).where(
+                            Deployment.id == deployment_id
+                        )
                     )
 
-                    await db.commit()
+                    fresh = result.scalar_one_or_none()
+
+                    if fresh:
+
+                        fresh.status = DeploymentStatus.FAILED
+
+                        fresh.finished_at = datetime.now(
+                            timezone.utc
+                        )
+
+                        if fresh.started_at:
+
+                            started = fresh.started_at
+
+                            if started.tzinfo is None:
+                                started = started.replace(
+                                    tzinfo=timezone.utc
+                                )
+
+                            fresh.duration_seconds = (
+                                fresh.finished_at - started
+                            ).total_seconds()
+
+                        await db.commit()
+
+                        logger.info(
+                            f"Deployment {deployment_id} marked FAILED"
+                        )
 
                     duration = time.time() - pipeline_start
 
