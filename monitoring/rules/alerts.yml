@@ -1,0 +1,53 @@
+groups:
+  - name: gitops_alerts
+    rules:
+
+    # ── Deployment failure rate too high ──────────────────────────────────
+    - alert: HighDeploymentFailureRate
+      expr: |
+        rate(gitops_deployments_failed_total[30m])
+        /
+        rate(gitops_deployments_total[30m]) > 0.5
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: 'More than 50% of deployments are failing'
+
+    # ── No deployments in 24 hours (pipeline stuck?) ─────────────────────
+    - alert: NoDeployments
+      expr: increase(gitops_deployments_total[24h]) == 0
+      for: 1h
+      labels:
+        severity: info
+      annotations:
+        summary: 'No deployments triggered in the last 24 hours'
+
+    # ── App EC2 high CPU ───────────────────────────────────────────────────
+    - alert: HighCPUUsage
+      expr: |
+        100 - (avg by(instance)
+        (rate(node_cpu_seconds_total{mode='idle'}[5m])) * 100) > 85
+      for: 10m
+      labels:
+        severity: warning
+      annotations:
+        summary: 'CPU usage above 85% on {{ $labels.instance }}'
+
+    # ── Backend down ──────────────────────────────────────────────────────
+    - alert: FastAPIDown
+      expr: up{job='fastapi-backend'} == 0
+      for: 1m
+      labels:
+        severity: critical
+      annotations:
+        summary: 'FastAPI backend is unreachable'
+
+    # ── Jenkins down ──────────────────────────────────────────────────────
+    - alert: JenkinsDown
+      expr: up{job='jenkins'} == 0
+      for: 1m
+      labels:
+        severity: critical
+      annotations:
+        summary: 'Jenkins is unreachable'
