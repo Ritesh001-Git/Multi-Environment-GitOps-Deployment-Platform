@@ -155,7 +155,7 @@ The GitOps Deployment Platform automates the entire deployment lifecycle from Gi
 
 | Category | Technology | Purpose |
 |----------|-----------|---------|
-| **Cloud** | AWS EC2 (t2.micro × 2) | Compute infrastructure |
+| **Cloud** | AWS EC2 (t2.small × 2) | Compute infrastructure |
 | **IaC** | Terraform | Provision EC2, security groups, elastic IPs |
 | **CI/CD** | Jenkins | Pipeline orchestration, parameterized jobs |
 | **Container** | Docker | Multi-stage builds, semantic versioning |
