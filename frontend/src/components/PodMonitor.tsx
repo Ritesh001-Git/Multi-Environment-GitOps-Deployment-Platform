@@ -15,10 +15,10 @@ import {
 import { formatAge } from "./common/utils";
 import type { Pod } from "../types";
 
-const NAMESPACE_OPTIONS = ["default", "kube-system", "all"];
+const NAMESPACE_OPTIONS = ["gitops"];
 
 export default function PodMonitor() {
-  const [namespace, setNamespace] = useState("default");
+  const [namespace, setNamespace] = useState("gitops");
   const [view, setView] = useState<"cards" | "table">("cards");
 
   const { data, loading, error, refresh } = useK8sOverview(namespace, 15_000);
@@ -73,7 +73,7 @@ export default function PodMonitor() {
 
       {error && (
         <ErrorBanner
-          message={`Kubernetes not reachable: ${error}. Is Minikube running?`}
+          message={`Kubernetes not reachable: ${error}. Check the K3s API and service-account RBAC.`}
           onRetry={refresh}
         />
       )}
@@ -122,7 +122,7 @@ export default function PodMonitor() {
         <EmptyState
           icon="☸"
           title="No pods found"
-          subtitle={`No pods in namespace '${namespace}'. Is Minikube running?`}
+          subtitle={`No pods are currently present in namespace '${namespace}'.`}
         />
       ) : view === "cards" ? (
         <PodCardGrid pods={data?.pods ?? []} />
@@ -228,13 +228,14 @@ function PodCard({ pod }: { pod: Pod }) {
         <PodMeta label="Image" value={pod.image} mono truncatable />
         <PodMeta label="Tag" value={pod.image_tag} mono />
         <PodMeta label="Node" value={pod.node_name ?? "—"} mono truncatable />
+        <PodMeta label="Pod IP" value={pod.pod_ip ?? "—"} mono />
         <PodMeta label="Age" value={formatAge(pod.age_seconds)} />
         <PodMeta
           label="Restarts"
           value={String(pod.restart_count)}
           accent={pod.restart_count > 3 ? "text-red-600 font-bold" : undefined}
         />
-        <PodMeta label="Ready" value={pod.ready ? "✓ Yes" : "✗ No"} accent={pod.ready ? "text-emerald-600" : "text-red-600"} />
+        <PodMeta label="Ready" value={`${pod.ready_containers}/${pod.total_containers}`} accent={pod.ready ? "text-emerald-600" : "text-red-600"} />
       </div>
     </div>
   );
@@ -274,7 +275,7 @@ function PodTable({ pods }: { pods: Pod[] }) {
         <table className="w-full text-sm">
           <thead className="bg-gray-50 border-b border-gray-100">
             <tr>
-              {["Pod Name", "Namespace", "Status", "Image", "Tag", "Node", "Restarts", "Age"].map(
+              {["Pod Name", "Namespace", "Status", "Ready", "Restarts", "Age", "Node", "Pod IP", "Image"].map(
                 (h) => (
                   <th
                     key={h}
@@ -296,18 +297,23 @@ function PodTable({ pods }: { pods: Pod[] }) {
                 <td className="px-4 py-3">
                   <PodStatusBadge status={pod.status} />
                 </td>
-                <td className="px-4 py-3 font-mono text-xs text-gray-600 max-w-xs truncate">
-                  {pod.image}
-                </td>
-                <td className="px-4 py-3 font-mono text-xs text-gray-500">{pod.image_tag}</td>
-                <td className="px-4 py-3 font-mono text-xs text-gray-500 max-w-xs truncate">
-                  {pod.node_name ?? "—"}
+                <td className="px-4 py-3 text-xs font-semibold text-gray-700">
+                  {pod.ready_containers}/{pod.total_containers}
                 </td>
                 <td className={`px-4 py-3 text-xs font-semibold ${pod.restart_count > 3 ? "text-red-600" : "text-gray-700"}`}>
                   {pod.restart_count}
                 </td>
                 <td className="px-4 py-3 text-xs text-gray-500">
                   {formatAge(pod.age_seconds)}
+                </td>
+                <td className="px-4 py-3 font-mono text-xs text-gray-500 max-w-xs truncate">
+                  {pod.node_name ?? "—"}
+                </td>
+                <td className="px-4 py-3 font-mono text-xs text-gray-500">
+                  {pod.pod_ip ?? "—"}
+                </td>
+                <td className="px-4 py-3 font-mono text-xs text-gray-600 max-w-xs truncate">
+                  {pod.image}:{pod.image_tag}
                 </td>
               </tr>
             ))}

@@ -16,10 +16,12 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
+from sqlalchemy.engine import make_url
 
 from core.config import settings
 from db.database import init_db
 from api.routes.deployments import router as deploy_router
+from services import deployment_service
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -34,16 +36,20 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # ── Startup ───────────────────────────────────────────────────────────────
     logger.info("Starting %s v%s", settings.APP_NAME, settings.APP_VERSION)
-    logger.info("Database: %s", settings.DATABASE_URL)
+    logger.info("Database: %s", make_url(settings.DATABASE_URL).render_as_string(hide_password=True))
     logger.info("Jenkins:  %s / job: %s", settings.JENKINS_URL, settings.JENKINS_JOB_NAME)
     logger.info("K8s mode: %s / namespace: %s", settings.KUBE_MODE, settings.KUBE_NAMESPACE)
 
     await init_db()
     logger.info("Database tables ready.")
+    resumed = await deployment_service.resume_incomplete_pipelines()
+    if resumed:
+        logger.info("Resumed %d incomplete deployment pipeline(s).", resumed)
 
     yield
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
+    await deployment_service.stop_pipeline_tasks()
     logger.info("Shutting down.")
 
 

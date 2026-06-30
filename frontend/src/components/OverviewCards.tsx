@@ -20,6 +20,12 @@ export default function OverviewCards() {
         <LiveIndicator active={!loading} />
       </div>
 
+      {data && !data.kubernetes_available && (
+        <div className="mb-4">
+          <ErrorBanner message={`Kubernetes metrics unavailable: ${data.kubernetes_error ?? "connection failed"}`} />
+        </div>
+      )}
+
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <StatCard
           label="Total Deployments"
@@ -51,7 +57,9 @@ export default function OverviewCards() {
           sub={
             data?.running_deployments
               ? `${data.running_deployments} deploy in progress`
-              : "cluster healthy"
+              : data?.kubernetes_available
+              ? "cluster healthy"
+              : "cluster unavailable"
           }
           accent="text-blue-600"
           loading={loading && !data}

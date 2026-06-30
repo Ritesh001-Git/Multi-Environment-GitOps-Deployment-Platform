@@ -1,0 +1,12 @@
+.git
+.env
+**/.env
+**/__pycache__
+**/*.py[cod]
+backend/venv
+backend/gitops.db
+backend/tests
+frontend/node_modules
+frontend/dist
+monitoring
+terraform

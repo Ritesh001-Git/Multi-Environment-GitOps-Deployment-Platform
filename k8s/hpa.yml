@@ -9,8 +9,10 @@ spec:
     kind: Deployment
     name: gitops-app
 
-  minReplicas: 2
-  maxReplicas: 6
+  # Keep one replica while using SQLite. Raise this only after configuring a
+  # shared PostgreSQL DATABASE_URL and an external deployment task worker.
+  minReplicas: 1
+  maxReplicas: 1
 
   metrics:
     - type: Resource

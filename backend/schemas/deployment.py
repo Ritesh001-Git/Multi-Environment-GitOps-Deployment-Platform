@@ -2,7 +2,9 @@
 schemas/deployment.py — Pydantic models for API input/output.
 Keeps ORM models separate from API contracts.
 """
-from pydantic import BaseModel, HttpUrl, field_validator
+import re
+
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 from typing import Optional
 from models.deployment import DeploymentStatus, DeploymentEnvironment
@@ -11,17 +13,40 @@ from models.deployment import DeploymentStatus, DeploymentEnvironment
 # ── Request bodies ────────────────────────────────────────────────────────────
 
 class DeployRequest(BaseModel):
-    repo_url: str
-    branch: str = "main"
+    repo_url: str = Field(max_length=512)
+    branch: str = Field(default="main", min_length=1, max_length=255)
     environment: DeploymentEnvironment = DeploymentEnvironment.LOCAL_K8S
     docker_image: Optional[str] = None
 
     @field_validator("repo_url")
     @classmethod
     def must_be_github(cls, v: str) -> str:
-        if not v.startswith("https://github.com/"):
+        normalized = v.rstrip("/")
+        if not re.fullmatch(
+            r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?",
+            normalized,
+        ):
             raise ValueError("Only GitHub HTTPS URLs are supported.")
-        return v.rstrip("/")
+        return normalized
+
+    @field_validator("branch")
+    @classmethod
+    def valid_branch(cls, value: str) -> str:
+        if ".." in value or not re.fullmatch(r"[A-Za-z0-9._/-]+", value):
+            raise ValueError("Branch contains unsupported characters.")
+        return value
+
+    @field_validator("docker_image")
+    @classmethod
+    def valid_docker_image(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        if not re.fullmatch(
+            r"[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+",
+            value,
+        ):
+            raise ValueError("Docker image must be a lowercase registry/repository name without a tag.")
+        return value
 
 
 # ── Response bodies ───────────────────────────────────────────────────────────
@@ -68,8 +93,10 @@ class DashboardStats(BaseModel):
     failed_deployments: int
     running_deployments: int
     success_rate: float          # 0.0 – 100.0
-    running_pods: int
-    active_services: int
+    running_pods: Optional[int]
+    active_services: Optional[int]
+    kubernetes_available: bool = True
+    kubernetes_error: Optional[str] = None
     avg_duration_seconds: Optional[float]
 
 
@@ -80,8 +107,11 @@ class PodOut(BaseModel):
     namespace: str
     status: str                  # Running | Pending | Failed | Succeeded | Unknown
     ready: bool
+    ready_containers: int
+    total_containers: int
     restart_count: int
     node_name: Optional[str]
+    pod_ip: Optional[str]
     image: str
     image_tag: str
     age_seconds: int

@@ -78,7 +78,7 @@ export const deploymentsApi = {
 // ── Kubernetes ────────────────────────────────────────────────────────────────
 
 export const kubernetesApi = {
-  getOverview: async (namespace = "default"): Promise<K8sOverview> => {
+  getOverview: async (namespace = "gitops"): Promise<K8sOverview> => {
     const { data } = await apiClient.get<K8sOverview>(
       "/deployments/kubernetes/overview",
       { params: { namespace } }
@@ -86,7 +86,7 @@ export const kubernetesApi = {
     return data;
   },
 
-  getPods: async (namespace = "default"): Promise<Pod[]> => {
+  getPods: async (namespace = "gitops"): Promise<Pod[]> => {
     const { data } = await apiClient.get<{ pods: Pod[] }>(
       "/deployments/kubernetes/pods",
       { params: { namespace } }

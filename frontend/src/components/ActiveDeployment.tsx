@@ -3,7 +3,7 @@
 
 import React, { useEffect, useState } from "react";
 import { useDeploymentSocket, useDeployment } from "../hooks";
-import { StatusBadge, Spinner } from "./common/UI";
+import { StatusBadge } from "./common/UI";
 import { formatDuration } from "./common/utils";
 import type { DeploymentStatusUpdate } from "../types";
 
@@ -15,18 +15,6 @@ const STAGES = [
   { id: "health", label: "Health Check",          icon: "♡" },
 ];
 
-// Infer which stage is active from elapsed time (rough heuristic until
-// Jenkins stage data is available via API)
-function inferStageIndex(status: string, durationSeconds: number | null): number {
-  if (status !== "running") return -1;
-  const s = durationSeconds ?? 0;
-  if (s < 10)  return 0;
-  if (s < 40)  return 1;
-  if (s < 70)  return 2;
-  if (s < 100) return 3;
-  return 4;
-}
-
 interface Props {
   deploymentId: string;
   onComplete?: () => void;
@@ -34,7 +22,12 @@ interface Props {
 
 export default function ActiveDeployment({ deploymentId, onComplete }: Props) {
   const [elapsed, setElapsed] = useState(0);
-  const [startTime] = useState(Date.now());
+  const [startTime, setStartTime] = useState(Date.now());
+
+  useEffect(() => {
+    setElapsed(0);
+    setStartTime(Date.now());
+  }, [deploymentId]);
 
   // WebSocket for real-time updates
   const { update: wsUpdate, connected } = useDeploymentSocket(deploymentId);
@@ -47,10 +40,16 @@ export default function ActiveDeployment({ deploymentId, onComplete }: Props) {
   const buildNumber = wsUpdate?.jenkins_build_number ?? dep?.jenkins_build_number;
   const buildUrl = wsUpdate?.jenkins_build_url ?? dep?.jenkins_build_url;
   const durationSeconds = wsUpdate?.duration_seconds ?? dep?.duration_seconds;
+  const authoritativeStartedAt = wsUpdate?.started_at ?? dep?.started_at;
 
   const isTerminal =
     status === "success" || status === "failed" || status === "cancelled";
-  const activeStage = inferStageIndex(status, elapsed / 1000);
+
+  useEffect(() => {
+    if (!authoritativeStartedAt) return;
+    const parsed = Date.parse(authoritativeStartedAt);
+    if (!Number.isNaN(parsed)) setStartTime(parsed);
+  }, [authoritativeStartedAt]);
 
   // Elapsed timer
   useEffect(() => {
@@ -68,7 +67,9 @@ export default function ActiveDeployment({ deploymentId, onComplete }: Props) {
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
         <div>
-          <h3 className="font-semibold text-gray-900">Pipeline Running</h3>
+          <h3 className="font-semibold text-gray-900">
+            {isTerminal ? "Pipeline Complete" : "Pipeline Running"}
+          </h3>
           <p className="text-xs text-gray-400 font-mono mt-0.5">
             {deploymentId.slice(0, 8)}
             {buildNumber && ` · Build #${buildNumber}`}
@@ -106,8 +107,10 @@ export default function ActiveDeployment({ deploymentId, onComplete }: Props) {
                 status === "success"
                   ? "100%"
                   : status === "failed"
-                  ? `${Math.min(((activeStage + 1) / STAGES.length) * 100, 95)}%`
-                  : `${Math.max(4, ((activeStage + 0.5) / STAGES.length) * 100)}%`,
+                  ? "100%"
+                  : status === "running"
+                  ? "50%"
+                  : "5%",
             }}
           />
         </div>
@@ -115,12 +118,10 @@ export default function ActiveDeployment({ deploymentId, onComplete }: Props) {
 
       {/* Stage list */}
       <div className="space-y-2">
-        {STAGES.map((stage, idx) => {
-          const isDone = isTerminal
-            ? status === "success"
-            : idx < activeStage;
-          const isActive = !isTerminal && idx === activeStage;
-          const isFailed = status === "failed" && idx === activeStage;
+        {STAGES.map((stage) => {
+          const isDone = status === "success";
+          const isActive = false;
+          const isFailed = false;
 
           return (
             <div
@@ -166,7 +167,9 @@ export default function ActiveDeployment({ deploymentId, onComplete }: Props) {
               </span>
 
               {/* Right side */}
-              {isActive && !isFailed && <Spinner size="sm" />}
+              {status === "running" && (
+                <span className="text-xs text-gray-400">see Jenkins log</span>
+              )}
             </div>
           );
         })}
