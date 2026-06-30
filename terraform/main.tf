@@ -27,9 +27,30 @@ variable "key_pair_name" {
   default = "gitops-key"
 }
 
-# variable "your_ip" {
-#   description = "Your public IP in CIDR format (example: 1.2.3.4/32)"
-# }
+variable "admin_cidr" {
+  description = "Trusted administrator public IP in CIDR form (for example 203.0.113.10/32)"
+  type        = string
+}
+
+variable "app_client_cidr" {
+  description = "CIDR allowed to reach the HTTP ingress; keep restricted until TLS and API authentication are enabled"
+  type        = string
+}
+
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"]
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
 
 # ─────────────────────────────────────────────────────────────
 # Security Group: Jenkins
@@ -44,7 +65,7 @@ resource "aws_security_group" "jenkins_sg" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.admin_cidr]
   }
 
   ingress {
@@ -52,42 +73,28 @@ resource "aws_security_group" "jenkins_sg" {
     from_port   = 8080
     to_port     = 8080
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.admin_cidr]
   }
   ingress {
     description = "Grafana"
     from_port   = 3001
     to_port     = 3001
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.admin_cidr]
   }
   ingress {
     description = "Prometheus"
     from_port   = 9090
     to_port     = 9090
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.admin_cidr]
   }
   ingress {
     description = "Alertmanager"
     from_port   = 9093
     to_port     = 9093
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    description = "cAdvisor"
-    from_port   = 8081
-    to_port     = 8081
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    description = "Node Exporter"
-    from_port   = 9100
-    to_port     = 9100
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.admin_cidr]
   }
 
   egress {
@@ -116,11 +123,11 @@ resource "aws_security_group" "app_sg" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.admin_cidr]
   }
 
   ingress {
-    description = "Allow Jenkins to SSH into app server"
+    description     = "Allow Jenkins to SSH into app server"
     from_port       = 22
     to_port         = 22
     protocol        = "tcp"
@@ -128,33 +135,27 @@ resource "aws_security_group" "app_sg" {
   }
 
   ingress {
-    description = "Frontend application"
-    from_port   = 3000
-    to_port     = 3000
+    description = "Traefik HTTP ingress"
+    from_port   = 80
+    to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = [var.app_client_cidr]
   }
 
   ingress {
-    description = "Backend application"
-    from_port   = 8000
-    to_port     = 8000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    description     = "FastAPI metrics through Traefik from Jenkins/Prometheus"
+    from_port       = 80
+    to_port         = 80
+    protocol        = "tcp"
+    security_groups = [aws_security_group.jenkins_sg.id]
   }
+
   ingress {
-    description = "For app run"
-    from_port   = 8001
-    to_port     = 8010
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    description = "Node Exporter"
-    from_port   = 9100
-    to_port     = 9100
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    description     = "K3s monitoring NodePorts from Jenkins/Prometheus"
+    from_port       = 30090
+    to_port         = 30091
+    protocol        = "tcp"
+    security_groups = [aws_security_group.jenkins_sg.id]
   }
 
   egress {
@@ -170,18 +171,32 @@ resource "aws_security_group" "app_sg" {
   }
 }
 
+resource "aws_security_group_rule" "jenkins_api_from_app" {
+  description              = "FastAPI backend can trigger and poll Jenkins"
+  type                     = "ingress"
+  from_port                = 8080
+  to_port                  = 8080
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.jenkins_sg.id
+  source_security_group_id = aws_security_group.app_sg.id
+}
+
 # ─────────────────────────────────────────────────────────────
 # Jenkins EC2 Instance
 # ─────────────────────────────────────────────────────────────
 
 resource "aws_instance" "jenkins_ec2" {
-  ami                    = "ami-0c7217cdde317cfec"
+  ami                    = data.aws_ami.ubuntu.id
   instance_type          = "t3.small"
   key_name               = var.key_pair_name
   vpc_security_group_ids = [aws_security_group.jenkins_sg.id]
   root_block_device {
     volume_size = 20
     volume_type = "gp3"
+    encrypted   = true
+  }
+  metadata_options {
+    http_tokens = "required"
   }
   tags = {
     Name = "jenkins-master"
@@ -193,10 +208,20 @@ resource "aws_instance" "jenkins_ec2" {
 # ─────────────────────────────────────────────────────────────
 
 resource "aws_instance" "app_ec2" {
-  ami                    = "ami-0c7217cdde317cfec"
-  instance_type          = "t3.micro"
+  ami                    = data.aws_ami.ubuntu.id
+  instance_type          = "t3.small"
   key_name               = var.key_pair_name
   vpc_security_group_ids = [aws_security_group.app_sg.id]
+
+  root_block_device {
+    volume_size = 20
+    volume_type = "gp3"
+    encrypted   = true
+  }
+
+  metadata_options {
+    http_tokens = "required"
+  }
 
   tags = {
     Name = "app-server"
