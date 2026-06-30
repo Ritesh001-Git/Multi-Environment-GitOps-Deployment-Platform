@@ -5,9 +5,9 @@ groups:
     # ── Deployment failure rate too high ──────────────────────────────────
     - alert: HighDeploymentFailureRate
       expr: |
-        rate(gitops_deployments_failed_total[30m])
+        sum by(environment) (rate(gitops_deployments_failed_total[30m]))
         /
-        rate(gitops_deployments_total[30m]) > 0.5
+        clamp_min(sum by(environment) (rate(gitops_deployments_total[30m])), 0.000001) > 0.5
       for: 5m
       labels:
         severity: warning
@@ -16,7 +16,7 @@ groups:
 
     # ── No deployments in 24 hours (pipeline stuck?) ─────────────────────
     - alert: NoDeployments
-      expr: increase(gitops_deployments_total[24h]) == 0
+      expr: sum(increase(gitops_deployments_total[24h])) == 0
       for: 1h
       labels:
         severity: info

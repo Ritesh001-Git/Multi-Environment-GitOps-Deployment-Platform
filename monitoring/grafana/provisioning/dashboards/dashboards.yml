@@ -1,0 +1,10 @@
+apiVersion: 1
+providers:
+  - name: GitOps Platform
+    orgId: 1
+    folder: GitOps
+    type: file
+    disableDeletion: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
