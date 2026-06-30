@@ -28,19 +28,51 @@ pipeline {
             defaultValue: '',
             description: 'Docker image name'
         )
+
+        choice(
+            name: 'ENVIRONMENT',
+            choices: ['local-k8s', 'staging', 'production'],
+            description: 'Deployment environment'
+        )
+
+        string(
+            name: 'APP_EC2_IP',
+            defaultValue: '',
+            description: 'SSH host or private IP of the K3s server'
+        )
     }
 
     environment {
 
-        APP_EC2_IP    = '98.87.239.109'
+        APP_EC2_IP    = "${params.APP_EC2_IP}"
 
         IMAGE_TAG     = "${BUILD_NUMBER}"
 
         K8S_NAMESPACE = 'gitops'
         K8S_DEPLOY    = 'gitops-app'
+        DEPLOY_ATTEMPTED = 'false'
     }
 
     stages {
+
+        stage('Validate Parameters') {
+            steps {
+                script {
+                    if (!(params.REPO_URL ==~ /^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\.git)?$/)) {
+                        error('REPO_URL must be a GitHub HTTPS clone URL')
+                    }
+                    if (!(params.BRANCH ==~ /^[A-Za-z0-9._\/-]+$/) || params.BRANCH.contains('..')) {
+                        error('BRANCH contains unsafe characters')
+                    }
+                    if (!(params.DOCKER_IMAGE ==~ /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)+$/)) {
+                        error('DOCKER_IMAGE is empty or invalid')
+                    }
+                    if (!(params.APP_EC2_IP ==~ /^[A-Za-z0-9.-]+$/)) {
+                        error('APP_EC2_IP is empty or invalid')
+                    }
+                }
+            }
+        }
 
         // ─────────────────────────────────────────────────────────────
         // 1. Clean Workspace
@@ -84,6 +116,14 @@ pipeline {
 
                 sh '''
                     test -f Dockerfile
+                    test -f k8s/deployment.yml
+                    test -f k8s/service.yml
+                    test -f k8s/ingress-traefik.yml
+                    test -f k8s/rbac.yml
+                    test -f k8s/namespace.yml
+                    test -f k8s/pvc.yaml
+                    test -f k8s/node-exporter.yml
+                    test -f k8s/kube-state-metrics-nodeport.yml
                 '''
             }
         }
@@ -131,11 +171,12 @@ pipeline {
                             --password-stdin
                     '''
 
-                    sh """
-                        docker push ${params.DOCKER_IMAGE}:${IMAGE_TAG}
-
-                        docker push ${params.DOCKER_IMAGE}:latest
-                    """
+                    retry(2) {
+                        sh """
+                            docker push ${params.DOCKER_IMAGE}:${IMAGE_TAG}
+                            docker push ${params.DOCKER_IMAGE}:latest
+                        """
+                    }
 
                     sh '''
                         docker logout
@@ -150,27 +191,44 @@ pipeline {
         stage('Deploy to Kubernetes') {
 
             steps {
-
                 sshagent(credentials: ['app-ec2-ssh-key']) {
+                    sh """
+                        set -eu
+                        test -f k8s/deployment.yml
+                        rm -rf .rendered-k8s
+                        mkdir .rendered-k8s
+                        cp k8s/namespace.yml k8s/pvc.yaml k8s/rbac.yml \
+                           k8s/service.yml k8s/ingress-traefik.yml \
+                           k8s/node-exporter.yml k8s/kube-state-metrics-nodeport.yml \
+                           .rendered-k8s/
+                        sed 's|IMAGE_PLACEHOLDER|${params.DOCKER_IMAGE}:${IMAGE_TAG}|g' \
+                            k8s/deployment.yml > .rendered-k8s/deployment.yml
+
+                        ssh -o StrictHostKeyChecking=accept-new ubuntu@${APP_EC2_IP} \
+                            'rm -rf /tmp/gitops-k8s-${BUILD_NUMBER} && mkdir /tmp/gitops-k8s-${BUILD_NUMBER}'
+                        scp -o StrictHostKeyChecking=accept-new .rendered-k8s/* \
+                            ubuntu@${APP_EC2_IP}:/tmp/gitops-k8s-${BUILD_NUMBER}/
+                        ssh -o StrictHostKeyChecking=accept-new ubuntu@${APP_EC2_IP} '
+                            set -eu
+                            kubectl apply -f /tmp/gitops-k8s-${BUILD_NUMBER}/namespace.yml
+                            kubectl apply -f /tmp/gitops-k8s-${BUILD_NUMBER}/pvc.yaml
+                            kubectl apply -f /tmp/gitops-k8s-${BUILD_NUMBER}/rbac.yml
+                            kubectl get secret gitops-backend-env -n ${K8S_NAMESPACE} >/dev/null
+                        '
+                    """
+
+                    script {
+                        env.DEPLOY_ATTEMPTED = 'true'
+                    }
 
                     sh """
-                        ssh -o StrictHostKeyChecking=no ubuntu@${APP_EC2_IP} '
-
-                            set -e
-
-                            cd ~/gitops-platform
-
-                            git fetch origin
-
-                            git reset --hard origin/${params.BRANCH}
-
-                            kubectl create namespace ${K8S_NAMESPACE} \
-                              --dry-run=client -o yaml | kubectl apply -f -
-
-                            sed "s|IMAGE_PLACEHOLDER|${params.DOCKER_IMAGE}:${IMAGE_TAG}|g; \
-                                 s|IMAGE_TAG_PLACEHOLDER|${IMAGE_TAG}|g" \
-                                 k8s/deployment.yaml | kubectl apply -f -
-
+                        ssh -o StrictHostKeyChecking=accept-new ubuntu@${APP_EC2_IP} '
+                            set -eu
+                            kubectl apply -f /tmp/gitops-k8s-${BUILD_NUMBER}/deployment.yml
+                            kubectl apply -f /tmp/gitops-k8s-${BUILD_NUMBER}/service.yml
+                            kubectl apply -f /tmp/gitops-k8s-${BUILD_NUMBER}/ingress-traefik.yml
+                            kubectl apply -f /tmp/gitops-k8s-${BUILD_NUMBER}/node-exporter.yml
+                            kubectl apply -f /tmp/gitops-k8s-${BUILD_NUMBER}/kube-state-metrics-nodeport.yml
                         '
                     """
                 }
@@ -187,7 +245,7 @@ pipeline {
                 sshagent(credentials: ['app-ec2-ssh-key']) {
 
                     sh """
-                        ssh -o StrictHostKeyChecking=no ubuntu@${APP_EC2_IP} '
+                        ssh -o StrictHostKeyChecking=accept-new ubuntu@${APP_EC2_IP} '
 
                             set -e
 
@@ -245,26 +303,31 @@ ${K8S_NAMESPACE}
         }
 
         failure {
-
-            sshagent(credentials: ['app-ec2-ssh-key']) {
-
-                sh """
-                    ssh -o StrictHostKeyChecking=no ubuntu@${APP_EC2_IP} '
-
-                        kubectl rollout undo deployment/${K8S_DEPLOY} \
-                          -n ${K8S_NAMESPACE} || true
-                    '
-                """
+            script {
+                if (env.DEPLOY_ATTEMPTED == 'true') {
+                    sshagent(credentials: ['app-ec2-ssh-key']) {
+                        sh """
+                            ssh -o StrictHostKeyChecking=accept-new ubuntu@${APP_EC2_IP} '
+                                kubectl rollout undo deployment/${K8S_DEPLOY} \
+                                  -n ${K8S_NAMESPACE} || true
+                            '
+                        """
+                    }
+                    echo 'Deployment failed — rollback attempted'
+                } else {
+                    echo 'Build failed before deployment; existing Kubernetes revision was not changed'
+                }
             }
-
-            echo 'Deployment failed — rollback attempted'
         }
 
         always {
 
-            sh '''
-                docker image prune -af || true
-            '''
+            sh """
+                docker logout || true
+                docker image rm ${params.DOCKER_IMAGE}:${IMAGE_TAG} \
+                    ${params.DOCKER_IMAGE}:latest || true
+                rm -rf .rendered-k8s
+            """
         }
     }
 }
