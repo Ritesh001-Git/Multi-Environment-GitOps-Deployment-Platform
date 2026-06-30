@@ -1,7 +1,7 @@
 // components/deployments/DeploymentTable.tsx
 // Full dynamic deployment history — replaces all static placeholder rows
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useDeployments } from "../hooks";
 import {
   StatusBadge,
@@ -44,6 +44,13 @@ export default function DeploymentTable() {
   );
 
   const totalPages = data ? Math.ceil(data.total / PAGE_SIZE) : 0;
+
+  useEffect(() => {
+    if (!selected || !data) return;
+    const current = data.items.find((item) => item.id === selected.id);
+    if (!current) setSelected(null);
+    else if (current !== selected) setSelected(current);
+  }, [data, selected]);
 
   return (
     <div>
@@ -93,6 +100,9 @@ export default function DeploymentTable() {
                   Branch
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                  Docker Image
+                </th>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">
                   Status
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">
@@ -102,7 +112,10 @@ export default function DeploymentTable() {
                   Duration
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">
-                  Triggered
+                  Started
+                </th>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">
+                  Finished
                 </th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">
                   Environment
@@ -113,7 +126,7 @@ export default function DeploymentTable() {
               {loading && !data
                 ? Array.from({ length: 5 }).map((_, i) => (
                     <tr key={i}>
-                      {Array.from({ length: 7 }).map((_, j) => (
+                      {Array.from({ length: 9 }).map((_, j) => (
                         <td key={j} className="px-4 py-3">
                           <Skeleton className="h-4 w-full" />
                         </td>
@@ -194,16 +207,14 @@ function DeploymentRow({
     >
       <td className="px-4 py-3">
         <div className="font-medium text-gray-900">{dep.repo_name}</div>
-        {dep.docker_image && (
-          <div className="text-xs text-gray-400 font-mono mt-0.5">
-            {truncate(dep.docker_image, 40)}
-          </div>
-        )}
       </td>
       <td className="px-4 py-3">
         <span className="font-mono text-xs bg-gray-100 px-1.5 py-0.5 rounded">
           {dep.branch}
         </span>
+      </td>
+      <td className="px-4 py-3 font-mono text-xs text-gray-500" title={dep.docker_image ?? undefined}>
+        {dep.docker_image ? truncate(`${dep.docker_image}${dep.docker_tag ? `:${dep.docker_tag}` : ""}`, 36) : "—"}
       </td>
       <td className="px-4 py-3">
         <StatusBadge status={dep.status} />
@@ -236,6 +247,9 @@ function DeploymentRow({
         <span title={formatDateTime(dep.started_at)}>
           {formatRelativeTime(dep.started_at)}
         </span>
+      </td>
+      <td className="px-4 py-3 text-gray-500 text-xs whitespace-nowrap" title={formatDateTime(dep.finished_at)}>
+        {dep.finished_at ? formatRelativeTime(dep.finished_at) : "—"}
       </td>
       <td className="px-4 py-3">
         <span className="text-xs text-gray-500 capitalize">

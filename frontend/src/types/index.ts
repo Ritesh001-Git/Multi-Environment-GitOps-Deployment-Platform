@@ -56,8 +56,10 @@ export interface DashboardStats {
   failed_deployments: number;
   running_deployments: number;
   success_rate: number;       // 0–100
-  running_pods: number;
-  active_services: number;
+  running_pods: number | null;
+  active_services: number | null;
+  kubernetes_available: boolean;
+  kubernetes_error: string | null;
   avg_duration_seconds: number | null;
 }
 
@@ -68,8 +70,11 @@ export interface Pod {
   namespace: string;
   status: "Running" | "Pending" | "Failed" | "Succeeded" | "Unknown";
   ready: boolean;
+  ready_containers: number;
+  total_containers: number;
   restart_count: number;
   node_name: string | null;
+  pod_ip: string | null;
   image: string;
   image_tag: string;
   age_seconds: number;
@@ -103,6 +108,7 @@ export interface DeploymentStatusUpdate {
   status: DeploymentStatus;
   jenkins_build_number: number | null;
   jenkins_build_url: string | null;
+  started_at: string | null;
   duration_seconds: number | null;
   finished_at: string | null;
   error?: string;
