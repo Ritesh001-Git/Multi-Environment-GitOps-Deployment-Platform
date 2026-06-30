@@ -4,7 +4,8 @@ REST + WebSocket endpoints for GitOps platform.
 """
 
 import asyncio
-import json
+import hashlib
+import hmac
 import logging
 from typing import Optional
 
@@ -13,6 +14,7 @@ from fastapi import (
     Depends,
     HTTPException,
     Query,
+    Request,
     WebSocket,
     WebSocketDisconnect,
 )
@@ -64,7 +66,11 @@ async def get_stats(
 async def k8s_overview(
     namespace: str = Query("gitops"),
 ):
-    return k8s_service.get_overview(namespace)
+    try:
+        return await asyncio.to_thread(k8s_service.get_overview, namespace)
+    except Exception as exc:
+        logger.exception("Kubernetes overview failed", extra={"namespace": namespace})
+        raise HTTPException(status_code=503, detail="Kubernetes API unavailable") from exc
 
 
 @router.get("/kubernetes/pods")
@@ -72,7 +78,11 @@ async def list_pods(
     namespace: str = Query("gitops"),
 ):
 
-    pods = k8s_service.get_pods(namespace)
+    try:
+        pods = await asyncio.to_thread(k8s_service.get_pods, namespace)
+    except Exception as exc:
+        logger.exception("Kubernetes pod query failed", extra={"namespace": namespace})
+        raise HTTPException(status_code=503, detail="Kubernetes API unavailable") from exc
 
     return {
         "namespace": namespace,
@@ -89,7 +99,11 @@ async def list_k8s_deployments(
     namespace: str = Query("gitops"),
 ):
 
-    deps = k8s_service.get_deployments(namespace)
+    try:
+        deps = await asyncio.to_thread(k8s_service.get_deployments, namespace)
+    except Exception as exc:
+        logger.exception("Kubernetes deployment query failed", extra={"namespace": namespace})
+        raise HTTPException(status_code=503, detail="Kubernetes API unavailable") from exc
 
     return {
         "deployments": [
@@ -105,11 +119,28 @@ async def list_k8s_deployments(
 
 @router.post("/webhook/github")
 async def github_webhook(
-    request_body: dict,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    raw_body = await request.body()
+    if settings.GITHUB_WEBHOOK_SECRET:
+        provided = request.headers.get("x-hub-signature-256", "")
+        expected = "sha256=" + hmac.new(
+            settings.GITHUB_WEBHOOK_SECRET.encode(), raw_body, hashlib.sha256
+        ).hexdigest()
+        if not hmac.compare_digest(provided, expected):
+            raise HTTPException(status_code=401, detail="Invalid GitHub webhook signature")
+    try:
+        request_body = await request.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON payload") from exc
+
+    if request.headers.get("x-github-event") not in (None, "push"):
+        return {"status": "ignored"}
 
     ref = request_body.get("ref", "")
+    if not ref.startswith("refs/heads/"):
+        return {"status": "ignored"}
 
     branch = ref.replace(
         "refs/heads/",
@@ -143,10 +174,12 @@ async def github_webhook(
 
     await db.commit()
 
-    # IMPORTANT FIX
-    asyncio.create_task(
-        svc.run_pipeline(dep.id)
-    )
+    try:
+        await svc.prepare_pipeline(dep.id)
+    except svc.JenkinsIntegrationError as exc:
+        logger.exception("Jenkins rejected deployment", extra={"deployment_id": dep.id})
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    svc.start_pipeline(dep.id)
 
     logger.info(
         f"Webhook deployment started: "
@@ -179,6 +212,8 @@ async def deployment_websocket(
 
         while True:
 
+            from db.database import AsyncSessionLocal
+
             async with AsyncSessionLocal() as db:
 
                 deployment = await svc.get_deployment(
@@ -198,6 +233,7 @@ async def deployment_websocket(
                     "id": deployment.id,
                     "status": deployment.status.value,
                     "jenkins_build_number": deployment.jenkins_build_number,
+                    "jenkins_build_url": deployment.jenkins_build_url,
                     "started_at": (
                         deployment.started_at.isoformat()
                         if deployment.started_at else None
@@ -235,7 +271,7 @@ async def deployment_websocket(
 
         try:
             await websocket.close()
-        except:
+        except RuntimeError:
             pass
 
 
@@ -260,10 +296,12 @@ async def trigger_deployment(
 
     await db.commit()
 
-    # IMPORTANT FIX
-    asyncio.create_task(
-        svc.run_pipeline(dep.id)
-    )
+    try:
+        await svc.prepare_pipeline(dep.id)
+    except svc.JenkinsIntegrationError as exc:
+        logger.exception("Jenkins rejected deployment", extra={"deployment_id": dep.id})
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    svc.start_pipeline(dep.id)
 
     logger.info(
         f"Deployment queued: {dep.id}"
@@ -272,8 +310,8 @@ async def trigger_deployment(
     return TriggerResponse(
         deployment_id=dep.id,
         jenkins_build_number=None,
-        message="Deployment queued",
-        status=dep.status,
+        message="Jenkins accepted deployment",
+        status=DeploymentStatus.RUNNING,
     )
 
 

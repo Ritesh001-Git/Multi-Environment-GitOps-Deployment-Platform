@@ -6,7 +6,9 @@ All methods return plain dicts / Pydantic models — no k8s objects leak out.
 import logging
 from datetime import datetime, timezone
 from typing import Optional
-from tenacity import retry, stop_after_attempt, wait_fixed
+from functools import lru_cache
+
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from core.config import settings
 from schemas.deployment import PodOut, K8sDeploymentOut, K8sOverview
@@ -14,6 +16,13 @@ from schemas.deployment import PodOut, K8sDeploymentOut, K8sOverview
 logger = logging.getLogger(__name__)
 
 
+def _is_retryable(exc: BaseException) -> bool:
+    """Retry transport failures and server throttling/errors, never RBAC/validation 4xx."""
+    status = getattr(exc, "status", None)
+    return status is None or status == 0 or status == 429 or status >= 500
+
+
+@lru_cache(maxsize=1)
 def _get_k8s_clients():
     """
     Lazy-load the kubernetes client.
@@ -27,15 +36,17 @@ def _get_k8s_clients():
             k8s_config.load_kube_config()
         return client.CoreV1Api(), client.AppsV1Api()
     except Exception as e:
-        logger.warning(f"Kubernetes not available: {e}")
+        logger.exception("Kubernetes client initialization failed")
         raise
 
 
 def _parse_image(image: str) -> tuple[str, str]:
     """Split 'repo/name:tag' → ('repo/name', 'tag')."""
-    if ":" in image:
-        parts = image.rsplit(":", 1)
-        return parts[0], parts[1]
+    if "@" in image:
+        name, digest = image.rsplit("@", 1)
+        return name, digest
+    if image.rfind(":") > image.rfind("/"):
+        return tuple(image.rsplit(":", 1))
     return image, "latest"
 
 
@@ -62,19 +73,28 @@ def _pod_restart_count(pod) -> int:
     return sum(cs.restart_count for cs in pod.status.container_statuses)
 
 
+def _pod_container_readiness(pod) -> tuple[int, int]:
+    statuses = pod.status.container_statuses or []
+    return sum(1 for status in statuses if status.ready), len(pod.spec.containers or [])
+
+
 def _pod_to_schema(pod) -> PodOut:
     image = ""
     if pod.spec.containers:
         image = pod.spec.containers[0].image or ""
     img_name, img_tag = _parse_image(image)
+    ready_containers, total_containers = _pod_container_readiness(pod)
 
     return PodOut(
         name=pod.metadata.name,
         namespace=pod.metadata.namespace,
         status=pod.status.phase or "Unknown",
         ready=_pod_ready(pod),
+        ready_containers=ready_containers,
+        total_containers=total_containers,
         restart_count=_pod_restart_count(pod),
         node_name=pod.spec.node_name,
+        pod_ip=pod.status.pod_ip,
         image=img_name,
         image_tag=img_tag,
         age_seconds=_age_seconds(pod.metadata.creation_timestamp),
@@ -100,43 +120,58 @@ def _deployment_to_schema(dep) -> K8sDeploymentOut:
 
 class KubernetesService:
     """
-    Wraps kubernetes-client calls.
-    Every public method catches exceptions and returns safe defaults
-    so the API never 500s just because k8s is unreachable.
+    Wraps kubernetes-client calls. Failures are deliberately propagated so API
+    consumers can distinguish an empty namespace from an unavailable cluster.
     """
 
+    @retry(
+        retry=retry_if_exception(_is_retryable),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.25, max=2),
+        reraise=True,
+    )
     def get_pods(self, namespace: str = "default") -> list[PodOut]:
-        try:
-            core, _ = _get_k8s_clients()
-            if namespace == "all":
-                pods = core.list_pod_for_all_namespaces(watch=False)
-            else:
-                pods = core.list_namespaced_pod(namespace=namespace, watch=False)
-            return [_pod_to_schema(p) for p in pods.items]
-        except Exception as e:
-            logger.error(f"get_pods failed: {e}")
-            return []
+        core, _ = _get_k8s_clients()
+        timeout = settings.KUBE_REQUEST_TIMEOUT_SECONDS
+        if namespace == "all":
+            pods = core.list_pod_for_all_namespaces(watch=False, _request_timeout=timeout)
+        else:
+            pods = core.list_namespaced_pod(
+                namespace=namespace, watch=False, _request_timeout=timeout
+            )
+        return [_pod_to_schema(p) for p in pods.items]
 
+    @retry(
+        retry=retry_if_exception(_is_retryable),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.25, max=2),
+        reraise=True,
+    )
     def get_deployments(self, namespace: str = "default") -> list[K8sDeploymentOut]:
-        try:
-            _, apps = _get_k8s_clients()
-            if namespace == "all":
-                deps = apps.list_deployment_for_all_namespaces(watch=False)
-            else:
-                deps = apps.list_namespaced_deployment(namespace=namespace, watch=False)
-            return [_deployment_to_schema(d) for d in deps.items]
-        except Exception as e:
-            logger.error(f"get_deployments failed: {e}")
-            return []
+        _, apps = _get_k8s_clients()
+        timeout = settings.KUBE_REQUEST_TIMEOUT_SECONDS
+        if namespace == "all":
+            deps = apps.list_deployment_for_all_namespaces(
+                watch=False, _request_timeout=timeout
+            )
+        else:
+            deps = apps.list_namespaced_deployment(
+                namespace=namespace, watch=False, _request_timeout=timeout
+            )
+        return [_deployment_to_schema(d) for d in deps.items]
 
+    @retry(
+        retry=retry_if_exception(_is_retryable),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.25, max=2),
+        reraise=True,
+    )
     def get_namespaces(self) -> list[str]:
-        try:
-            core, _ = _get_k8s_clients()
-            ns_list = core.list_namespace(watch=False)
-            return [n.metadata.name for n in ns_list.items]
-        except Exception as e:
-            logger.error(f"get_namespaces failed: {e}")
-            return ["default"]
+        core, _ = _get_k8s_clients()
+        ns_list = core.list_namespace(
+            watch=False, _request_timeout=settings.KUBE_REQUEST_TIMEOUT_SECONDS
+        )
+        return [n.metadata.name for n in ns_list.items]
 
     def get_overview(self, namespace: str = "default") -> K8sOverview:
         pods = self.get_pods(namespace)
@@ -157,18 +192,23 @@ class KubernetesService:
         pods = self.get_pods(namespace)
         return sum(1 for p in pods if p.status == "Running")
 
+    @retry(
+        retry=retry_if_exception(_is_retryable),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.25, max=2),
+        reraise=True,
+    )
     def get_active_service_count(self, namespace: str = "default") -> int:
-        try:
-            core, _ = _get_k8s_clients()
-            if namespace == "all":
-                svcs = core.list_service_for_all_namespaces(watch=False)
-            else:
-                svcs = core.list_namespaced_service(namespace=namespace, watch=False)
-            # Exclude kubernetes default service
-            return sum(1 for s in svcs.items if s.metadata.name != "kubernetes")
-        except Exception as e:
-            logger.error(f"get_active_service_count failed: {e}")
-            return 0
+        core, _ = _get_k8s_clients()
+        timeout = settings.KUBE_REQUEST_TIMEOUT_SECONDS
+        if namespace == "all":
+            svcs = core.list_service_for_all_namespaces(watch=False, _request_timeout=timeout)
+        else:
+            svcs = core.list_namespaced_service(
+                namespace=namespace, watch=False, _request_timeout=timeout
+            )
+        # Exclude kubernetes default service
+        return sum(1 for s in svcs.items if s.metadata.name != "kubernetes")
 
 
 # Singleton — import this everywhere
