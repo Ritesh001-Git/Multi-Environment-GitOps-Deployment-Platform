@@ -3,12 +3,15 @@ kind: IngressRoute
 metadata:
   name: gitops-app-route
   namespace: gitops
+
 spec:
   entryPoints:
     - web
+
   routes:
     - match: PathPrefix(`/`)
       kind: Rule
+
       services:
         - name: gitops-app-service
           port: 80
